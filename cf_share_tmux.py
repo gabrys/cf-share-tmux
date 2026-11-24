@@ -20,7 +20,7 @@ import threading
 import time
 import uuid
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 # Skip api.trycloudflare.com, which cloudflared mentions in its error messages.
 TUNNEL_URL = re.compile(r"https://(?!api\.)[a-z0-9-]+\.trycloudflare\.com")
@@ -66,6 +66,12 @@ def parse_args():
         help="Bind address",
     )
     parser.add_argument(
+        "--base-path",
+        default="",
+        metavar="PATH",
+        help="Serve ttyd under this URL path, e.g. /terminal (ttyd -b)",
+    )
+    parser.add_argument(
         "-c", "--credential",
         metavar="USER:PASSWORD",
         default=None,
@@ -107,13 +113,14 @@ def parse_args():
     if not 1 <= args.port <= 65535:
         parser.error("Invalid port")
 
+    if args.base_path and not args.base_path.startswith("/"):
+        parser.error("Base path must start with /")
+    args.base_path = args.base_path.rstrip("/")
+
     if args.credential:
         user, sep, password = args.credential.partition(":")
         if not sep or not user or not password:
             parser.error("Credentials must use USER:PASSWORD format")
-
-    if args.cf_tunnel and not args.credential:
-        parser.error("--cf-tunnel requires Basic Auth credentials")
 
     if args.json and not args.cf_tunnel:
         parser.error("--json requires --cf-tunnel")
@@ -286,6 +293,7 @@ def main():
         signal.signal(sig, request_stop)
 
     def on_url(url):
+        url += args.base_path
         if args.json:
             print(json.dumps({"url": url, "pid": os.getpid()}), flush=True)
         else:
@@ -339,6 +347,9 @@ def main():
         if not args.read_only:
             command.append("-W")
 
+        if args.base_path:
+            command.extend(["-b", args.base_path])
+
         if args.credential:
             command.extend(["-c", args.credential])
 
@@ -351,7 +362,7 @@ def main():
             "-t", f"={session}",
         ])
 
-        url = http_url(args.bind, args.port)
+        url = http_url(args.bind, args.port) + args.base_path
 
         info(f"Window:  {args.target} ({window})", flush=True)
         info(f"Session: {session}", flush=True)

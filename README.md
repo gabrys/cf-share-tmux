@@ -45,10 +45,11 @@ cf-share-tmux TARGET [options]
 |---|---|---|
 | `-p`, `--port` | `7681` | Local HTTP port for ttyd |
 | `-b`, `--bind` | `127.0.0.1` | Address ttyd listens on |
+| `--base-path PATH` | none | Serve under a URL path, e.g. `/terminal` (passed as `ttyd -b`) |
 | `-c`, `--credential USER:PASSWORD` | none | HTTP Basic Auth; also read from `TTYD_CREDENTIAL` |
 | `--read-only` | off | Viewers cannot type |
 | `--check-origin` | off | Make ttyd reject WebSocket connections from other origins |
-| `--cf-tunnel` | off | Also publish through a Cloudflare quick tunnel; needs `-c` |
+| `--cf-tunnel` | off | Also publish through a Cloudflare quick tunnel; authentication is optional |
 | `--json` | off | Print only `{"url": "<public URL>", "pid": <PID>}` on stdout; needs `--cf-tunnel` |
 | `--foreground` | off | Stay in the foreground until Ctrl+C instead of going to the background |
 | `--version` | | Print the version |
@@ -57,6 +58,11 @@ Without `--json`, stdout shows the window, the temporary session, the local
 URL, whether auth is enabled, the PID and, with `--cf-tunnel`,
 `Public:  <URL>`. With `--json`, stdout gets that single JSON line and nothing
 else; errors still go to stderr.
+
+For example, `cf-share-tmux work:2 --base-path /terminal` serves the terminal
+at `http://127.0.0.1:7681/terminal`. The path must start with `/`; trailing
+slashes are removed. Local and public URLs (including `--json`) include the
+path. The `-b` option still selects the bind address.
 
 The command returns as soon as the share is ready: with `--cf-tunnel` when the
 public URL is known, without it once ttyd has been running for a second. Its
@@ -103,8 +109,9 @@ Read this before sharing anything.
   credentials with such connections.
 - **The password is visible to local users.** It is passed to ttyd on the
   command line, so `ps` shows it, even when it comes from `TTYD_CREDENTIAL`.
-- **Through the tunnel, the password is the only protection.** Anyone who
-  learns the URL can try to guess it; use a long random one.
+- **Authentication is optional, including through the tunnel.** Without `-c`
+  or `TTYD_CREDENTIAL`, anyone with the public URL can access the terminal.
+  Set a long random password to require authentication.
 - Without `--cf-tunnel`, `-b 0.0.0.0` without `-c` exposes your shell to the
   whole local network over plain HTTP.
 
@@ -122,7 +129,7 @@ your sessions or the network.
 
 ## Publishing
 
-The version lives in `__version__` in `cf_share_tmux.py` (currently `0.1.0`).
+The version lives in `__version__` in `cf_share_tmux.py` (currently `0.1.1`).
 Build from a clean checkout using the commands above, ensuring `dist/` contains
 only the current release, then upload:
 

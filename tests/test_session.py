@@ -116,6 +116,32 @@ class SessionTestCase(unittest.TestCase):
 
 
 class ForegroundTests(SessionTestCase):
+    def test_tunnel_without_credentials(self):
+        proc = self.start("work:first", "--foreground", "--cf-tunnel", "--json")
+        [line] = self.read_lines(proc, 1)
+        self.assertEqual(json.loads(line), {"url": PUBLIC_URL, "pid": proc.pid})
+        args = (self.tmp / "ttyd-args").read_text().splitlines()
+        self.assertNotIn("-c", args)
+        self.assertEqual(self.stop(proc)[0], 128 + signal.SIGTERM)
+
+    def test_base_path_in_json_and_ttyd_arguments(self):
+        proc = self.start("work:first", "--foreground", "--cf-tunnel", "--json",
+                          "-c", "user:secret", "--base-path", "/nested/terminal/")
+        [line] = self.read_lines(proc, 1)
+        self.assertEqual(json.loads(line),
+                         {"url": PUBLIC_URL + "/nested/terminal", "pid": proc.pid})
+        args = (self.tmp / "ttyd-args").read_text().splitlines()
+        self.assertEqual(args[args.index("-b") + 1], "/nested/terminal")
+        self.assertEqual(self.stop(proc)[0], 128 + signal.SIGTERM)
+
+    def test_base_path_in_text_urls(self):
+        proc = self.start("work:first", "--foreground", "--cf-tunnel",
+                          "-c", "user:secret", "--base-path", "/terminal")
+        lines = self.read_lines(proc, 7)
+        self.assertEqual(lines[2], "Local:   http://127.0.0.1:7681/terminal\n")
+        self.assertEqual(lines[6], f"Public:  {PUBLIC_URL}/terminal\n")
+        self.assertEqual(self.stop(proc)[0], 128 + signal.SIGTERM)
+
     def read_lines(self, proc, count, timeout=10):
         lines = []
         while len(lines) < count:

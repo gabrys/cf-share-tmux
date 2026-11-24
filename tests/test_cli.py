@@ -20,7 +20,7 @@ class ArgumentTests(unittest.TestCase):
     def test_help(self):
         result = run_cli("--help")
         self.assertEqual(result.returncode, 0)
-        for option in ("--cf-tunnel", "--json", "--read-only", "--credential"):
+        for option in ("--cf-tunnel", "--json", "--read-only", "--credential", "--base-path"):
             self.assertIn(option, result.stdout)
 
     def test_version(self):
@@ -31,9 +31,9 @@ class ArgumentTests(unittest.TestCase):
     def test_invalid_arguments_are_rejected(self):
         cases = {
             ("work:1", "--port", "0"): "Invalid port",
+            ("work:1", "--base-path", "terminal"): "Base path must start with /",
             ("work:1", "-c", "nopassword"): "USER:PASSWORD",
             ("work:1", "-c", ":secret"): "USER:PASSWORD",
-            ("work:1", "--cf-tunnel"): "--cf-tunnel requires Basic Auth",
             ("work:1", "--json"): "--json requires --cf-tunnel",
         }
         env = {k: v for k, v in os.environ.items() if k != "TTYD_CREDENTIAL"}
