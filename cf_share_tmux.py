@@ -1,7 +1,14 @@
 #!/usr/bin/env python3
+"""cf-share-tmux: share a tmux window in the browser with ttyd, optionally
+through a Cloudflare quick tunnel.
+
+Linux only. Python standard library only. External executables: tmux, ttyd,
+and cloudflared for --cf-tunnel.
+"""
 
 import argparse
 import collections
+import ctypes
 import json
 import os
 import re
@@ -13,8 +20,13 @@ import threading
 import time
 import uuid
 
+__version__ = "0.1.0"
+
 # Skip api.trycloudflare.com, which cloudflared mentions in its error messages.
 TUNNEL_URL = re.compile(r"https://(?!api\.)[a-z0-9-]+\.trycloudflare\.com")
+TTYD_STARTUP = 1.0  # without a tunnel: ready once ttyd has survived this long
+SESSION_CHECK_EVERY = 2.0  # how often to check that the shared window still exists
+PR_SET_PDEATHSIG = 1
 
 
 def tmux(*args):
@@ -26,8 +38,16 @@ def tmux(*args):
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Expose a tmux window over HTTP using ttyd.",
+        prog="cf-share-tmux",
+        description="Expose a tmux window over HTTP using ttyd. Runs in the "
+                    "background once it is ready; stop it with kill <PID>.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+
+    parser.add_argument(
+        "--version",
+        action="version",
+        version="%(prog)s " + __version__,
     )
 
     parser.add_argument(
@@ -69,8 +89,13 @@ def parse_args():
     parser.add_argument(
         "--json",
         action="store_true",
-        help='Print only {"url": "<Cloudflare URL>"} on stdout '
+        help='Print only {"url": "<Cloudflare URL>", "pid": <PID>} on stdout '
              "(requires --cf-tunnel; errors still go to stderr)",
+    )
+    parser.add_argument(
+        "--foreground",
+        action="store_true",
+        help="Stay in the foreground until Ctrl+C instead of going to the background",
     )
 
     args = parser.parse_args()
@@ -114,12 +139,96 @@ def stop_process(process):
         process.wait()
 
 
-def watch_tunnel(process, as_json=False):
+def daemonize():
+    """Fork into the background; the parent exits once the child is ready.
+
+    The parent waits on a pipe. The child writes to it when it is ready (see
+    Handoff); then the parent exits with 0. If the child exits first, the
+    parent exits with the child's status. Everything the child prints before
+    it is ready still reaches the terminal. Ctrl+C in the parent stops the
+    child. Returns the pipe's write end in the child.
+    """
+    sys.stdout.flush()
+    sys.stderr.flush()
+    read_fd, write_fd = os.pipe()  # not inherited by ttyd/cloudflared (PEP 446)
+    pid = os.fork()
+
+    if pid == 0:
+        os.close(read_fd)
+        os.setsid()  # leave the terminal's session: no SIGINT/SIGHUP from it
+        return write_fd
+
+    os.close(write_fd)
+
+    try:
+        ready = os.read(read_fd, 1)
+    except KeyboardInterrupt:
+        os.kill(pid, signal.SIGTERM)
+        os.waitpid(pid, 0)
+        os._exit(130)
+
+    if ready:
+        os._exit(0)
+
+    _, status = os.waitpid(pid, 0)
+    code = os.waitstatus_to_exitcode(status)
+    os._exit(code if code >= 0 else 128 - code)
+
+
+class Handoff:
+    """Tells the waiting parent that the background child is ready.
+
+    On ready() the child points stdin/stdout/stderr at /dev/null, because the
+    terminal now belongs to the shell again, and releases the parent.
+    Without a parent (--foreground) ready() does nothing.
+    """
+
+    def __init__(self, fd):
+        self.fd = fd
+        self.lock = threading.Lock()
+
+    def ready(self):
+        with self.lock:
+            if self.fd is None:
+                return
+
+            sys.stdout.flush()
+            sys.stderr.flush()
+            devnull = os.open(os.devnull, os.O_RDWR)
+
+            for fd in (0, 1, 2):
+                os.dup2(devnull, fd)
+
+            os.close(devnull)
+            os.write(self.fd, b"1")
+            os.close(self.fd)
+            self.fd = None
+
+
+def die_with_parent():
+    """preexec_fn: the child gets SIGTERM when this process dies, even on SIGKILL."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    parent = os.getpid()
+
+    def preexec():
+        if libc.prctl(PR_SET_PDEATHSIG, signal.SIGTERM) != 0 or os.getppid() != parent:
+            os._exit(1)  # could not arm the signal, or the parent is already gone
+
+    return preexec
+
+
+def relay(stream):
+    """Copy a child's output to our stderr (which is /dev/null once in the background)."""
+    for line in stream:
+        sys.stderr.write(line)
+        sys.stderr.flush()
+
+
+def watch_tunnel(process, on_url):
     """Find the public URL in cloudflared's log; keep draining it afterwards.
 
-    The URL is printed as text, or as {"url": ...} with as_json. The log
-    itself is hidden; its last lines go to stderr only if cloudflared exits
-    without ever reporting a URL.
+    Calls on_url(url) once. The log itself is hidden; its last lines go to
+    stderr only if cloudflared exits without ever reporting a URL.
     """
     tail = collections.deque(maxlen=20)
     found = False
@@ -133,8 +242,7 @@ def watch_tunnel(process, as_json=False):
 
         if match:
             found = True
-            url = match.group(0)
-            print(json.dumps({"url": url}) if as_json else f"Public:  {url}", flush=True)
+            on_url(match.group(0))
 
     if not found:
         sys.stderr.write("".join(tail))
@@ -159,6 +267,9 @@ def main():
     if args.cf_tunnel:
         require_binary("cloudflared")
 
+    # Fork before any thread or child process exists.
+    handoff = Handoff(None if args.foreground else daemonize())
+
     session = f"serve-tmux-{args.port}-{uuid.uuid4().hex[:8]}"
 
     ttyd_process = None
@@ -173,6 +284,13 @@ def main():
 
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, request_stop)
+
+    def on_url(url):
+        if args.json:
+            print(json.dumps({"url": url, "pid": os.getpid()}), flush=True)
+        else:
+            print(f"Public:  {url}", flush=True)
+        handoff.ready()
 
     try:
         # Resolve the target to a stable window ID.
@@ -242,16 +360,23 @@ def main():
             f"Auth:    {'enabled' if args.credential else 'disabled'}",
             flush=True,
         )
+        info(f"PID:     {os.getpid()} (stop with: kill {os.getpid()})", flush=True)
 
         if stop_signal is not None:
             return 128 + stop_signal
 
+        # Start both children before any thread: preexec_fn is unsafe with threads.
         ttyd_process = subprocess.Popen(
             command,
-            # With --json keep stdout clean: anything ttyd prints goes to stderr.
-            stdout=sys.stderr if args.json else None,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="replace",
             start_new_session=True,
+            preexec_fn=die_with_parent(),
         )
+        ttyd_started = time.monotonic()
 
         # Optionally start Cloudflare Quick Tunnel.
         if args.cf_tunnel:
@@ -273,20 +398,28 @@ def main():
                     "--no-autoupdate",
                     "--url", origin_url,
                 ],
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
                 text=True,
                 errors="replace",
                 start_new_session=True,
+                preexec_fn=die_with_parent(),
             )
             cf_watcher = threading.Thread(
                 target=watch_tunnel,
-                args=(cf_process, args.json),
+                args=(cf_process, on_url),
                 daemon=True,
             )
+
+        threading.Thread(target=relay, args=(ttyd_process.stdout,), daemon=True).start()
+
+        if cf_watcher is not None:
             cf_watcher.start()
 
-        # Supervise both processes.
+        # Supervise both processes and the shared window.
+        next_session_check = time.monotonic() + SESSION_CHECK_EVERY
+
         while stop_signal is None:
             rc = ttyd_process.poll()
 
@@ -307,6 +440,22 @@ def main():
                         file=sys.stderr,
                     )
                     return rc or 1
+            elif time.monotonic() - ttyd_started >= TTYD_STARTUP:
+                handoff.ready()
+
+            if time.monotonic() >= next_session_check:
+                next_session_check = time.monotonic() + SESSION_CHECK_EVERY
+                exists = subprocess.run(
+                    ["tmux", "has-session", "-t", f"={session}"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                ).returncode == 0
+
+                if not exists:
+                    # tmux removes the session when its only window is closed.
+                    info("The shared window was closed.", flush=True)
+                    return 0
 
             time.sleep(0.25)
 
@@ -333,4 +482,3 @@ def main():
 
 if __name__ == "__main__":
     sys.exit(main())
-

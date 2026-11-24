@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cf-share-tmux"
+dynamic = ["version"]
+description = "Share a tmux window in the browser with ttyd, optionally through a Cloudflare quick tunnel."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = []
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Terminals",
+    "Topic :: Utilities",
+]
+
+[project.urls]
+Repository = "https://github.com/gabrys/cf-share-tmux"
+Issues = "https://github.com/gabrys/cf-share-tmux/issues"
+
+[project.scripts]
+cf-share-tmux = "cf_share_tmux:main"
+
+[tool.setuptools]
+py-modules = ["cf_share_tmux"]
+
+[tool.setuptools.dynamic]
+version = { attr = "cf_share_tmux.__version__" }
